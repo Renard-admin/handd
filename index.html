@@ -2,42 +2,54 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Умное распознавание</title>
+    <title>Улучшенное распознавание</title>
     <style>
-        body { margin: 0; overflow: hidden; }
+        /* Обновленные стили */
+        body, html { margin: 0; overflow: hidden; }
         #container { position: relative; width: 100vw; height: 100vh; }
-        video, canvas { position: absolute; top: 0; left: 0; transform: scaleX(-1); }
+        .video-layer { transform: scaleX(-1); }
         .canvas-layer { position: absolute; pointer-events: none; }
         .controls { position: fixed; top: 10px; right: 10px; z-index: 1000; }
-        button { display: block; margin: 5px; padding: 8px; background: #444; color: white; border: none; cursor: pointer; }
+        button { margin: 5px; padding: 8px 15px; background: #444; color: white; border: none; cursor: pointer; }
+        .info-box { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 10px; border-radius: 8px; }
     </style>
 </head>
 <body>
     <div id="container">
-        <video id="video" autoplay playsinline></video>
+        <video class="video-layer" id="video" autoplay playsinline></video>
         <canvas id="handCanvas" class="canvas-layer"></canvas>
         <canvas id="faceCanvas" class="canvas-layer"></canvas>
         <canvas id="objectCanvas" class="canvas-layer"></canvas>
+        <div class="info-box">Жесты: ✊✊👉 - рисовать | 👌 - очистить</div>
         <div class="controls">
-            <button id="fullscreenBtn">📺</button>
+            <button id="fullscreenBtn">⛶</button>
             <button id="switchCameraBtn">🔄 Камера</button>
         </div>
     </div>
 
+    <!-- Подключение библиотек -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2"></script>
     <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 
     <script>
+        // Инициализация переменных
         const video = document.getElementById('video');
         const handCanvas = document.getElementById('handCanvas');
         const faceCanvas = document.getElementById('faceCanvas');
         const objectCanvas = document.getElementById('objectCanvas');
         
-        let isDrawing = false;
         let currentStream = null;
+        let isDrawing = false;
+        let fistCount = 0;
         let modelsLoaded = false;
+
+        // Конфигурация распознавания
+        const config = {
+            dangerousObjects: ['knife', 'scissors', 'gun', 'firearm'],
+            foodObjects: ['apple', 'banana', 'pizza', 'sandwich', 'orange']
+        };
 
         // Инициализация моделей
         async function initializeModels() {
@@ -50,7 +62,7 @@
             modelsLoaded = true;
         }
 
-        // Запрос доступа к камере
+        // Настройка камеры
         async function setupCamera(facingMode = 'user') {
             const constraints = {
                 video: { 
@@ -68,10 +80,11 @@
                 await new Promise(resolve => video.onloadedmetadata = resolve);
                 setupCanvases();
             } catch (error) {
-                console.error('Ошибка доступа к камере:', error);
+                alert('Необходимо разрешить доступ к камере!');
             }
         }
 
+        // Настройка холстов
         function setupCanvases() {
             [handCanvas, faceCanvas, objectCanvas].forEach(canvas => {
                 canvas.width = video.videoWidth;
@@ -79,7 +92,7 @@
             });
         }
 
-        // Логика распознавания жестов
+        // Инициализация Mediapipe Hands
         const hands = new Hands({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
@@ -88,60 +101,98 @@
             maxNumHands: 2,
             modelComplexity: 1,
             minDetectionConfidence: 0.7,
-            minTrackingConfidence: 0.7
+            minTrackingConfidence: 0.5
         });
 
-        hands.onResults(processHands);
+        // Обработчик результатов для рук
+        hands.onResults((results) => {
+            const ctx = handCanvas.getContext('2d');
+            ctx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+            
+            if (results.multiHandLandmarks) {
+                results.multiHandLandmarks.forEach(landmarks => {
+                    // Отрисовка рамки руки
+                    drawHandBoundingBox(ctx, landmarks);
+                    
+                    // Логика жестов
+                    processGestures(landmarks);
+                });
+            }
+        });
 
-        // Обработка объектов
+        // Отрисовка рамки руки
+        function drawHandBoundingBox(ctx, landmarks) {
+            const xs = landmarks.map(l => l.x);
+            const ys = landmarks.map(l => l.y);
+            const x = Math.min(...xs) * handCanvas.width;
+            const y = Math.min(...ys) * handCanvas.height;
+            const width = (Math.max(...xs) - Math.min(...xs)) * handCanvas.width;
+            const height = (Math.max(...ys) - Math.min(...ys)) * handCanvas.height;
+            
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x, y, width, height);
+        }
+
+        // Логика обработки жестов
+        function processGestures(landmarks) {
+            const isFist = checkFistGesture(landmarks);
+            const isIndex = checkIndexGesture(landmarks);
+            const isOk = checkOkGesture(landmarks);
+
+            if (isFist) handleFistGesture();
+            if (isIndex && fistCount >= 2) startDrawing(landmarks);
+            if (isOk) clearDrawing();
+        }
+
+        // Остальные функции обработки жестов...
+
+        // Обнаружение объектов
         async function detectObjects() {
             if (!modelsLoaded) return;
             const predictions = await cocoSsd.detect(video);
-            drawObjectPredictions(predictions);
+            const ctx = objectCanvas.getContext('2d');
+            ctx.clearRect(0, 0, objectCanvas.width, objectCanvas.height);
+            
+            predictions.forEach(prediction => {
+                const [x, y, width, height] = prediction.bbox;
+                ctx.strokeStyle = getObjectColor(prediction.class);
+                ctx.lineWidth = 2;
+                ctx.strokeRect(x, y, width, height);
+                ctx.fillStyle = ctx.strokeStyle;
+                ctx.fillText(`${prediction.class} (${Math.round(prediction.score*100)}%)`, x, y-5);
+            });
         }
 
-        // Обработка лиц
-        async function detectFaces() {
-            if (!modelsLoaded) return;
-            const detections = await faceapi.detectAllFaces(video, 
-                new faceapi.TinyFaceDetectorOptions())
-                .withAgeAndGender()
-                .withFaceExpressions();
-            
-            const ctx = faceCanvas.getContext('2d');
-            ctx.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
-            
-            detections.forEach(detection => {
-                const box = detection.detection.box;
-                ctx.strokeStyle = 'yellow';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(box.x, box.y, box.width, box.height);
-                
-                // Вывод информации
-                ctx.fillStyle = 'yellow';
-                ctx.font = '12px Arial';
-                const age = Math.round(detection.age);
-                const gender = detection.gender;
-                const expression = Object.entries(detection.expressions)
-                    .reduce((a, b) => a[1] > b[1] ? a : b)[0];
-                
-                ctx.fillText(`${gender}, ~${age} лет`, box.x, box.y - 5);
-                ctx.fillText(`Настроение: ${expression}`, box.x, box.y - 20);
-            });
+        // Определение цвета рамки объекта
+        function getObjectColor(className) {
+            if (config.dangerousObjects.includes(className)) return '#ff0000';
+            if (config.foodObjects.includes(className)) return '#00ff00';
+            return '#ffff00';
         }
 
         // Основной цикл обработки
         async function processFrame() {
-            if (!modelsLoaded) return;
+            if (!modelsLoaded || video.paused) return;
             
-            await hands.send({ image: video });
-            await detectFaces();
-            await detectObjects();
+            // Обработка рук
+            await hands.send({image: video});
+            
+            // Обработка лиц и объектов
+            await Promise.all([detectFaces(), detectObjects()]);
             
             requestAnimationFrame(processFrame);
         }
 
-        // Кнопки управления
+        // Инициализация приложения
+        (async function main() {
+            await initializeModels();
+            await setupCamera();
+            video.play();
+            processFrame();
+        })();
+
+        // Обработчики кнопок
         document.getElementById('switchCameraBtn').addEventListener('click', async () => {
             const newMode = currentStream.getVideoTracks()[0].getSettings().facingMode === 'user' 
                 ? 'environment' : 'user';
@@ -155,14 +206,6 @@
                 document.exitFullscreen();
             }
         });
-
-        // Инициализация приложения
-        (async function main() {
-            await initializeModels();
-            await setupCamera();
-            video.play();
-            requestAnimationFrame(processFrame);
-        })();
     </script>
 </body>
 </html>
