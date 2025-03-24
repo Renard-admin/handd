@@ -1,171 +1,243 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Hand Gesture Drawing</title>
+    <title>AI Vision Demo</title>
     <style>
-        body {
-            margin: 0;
-            overflow: hidden;
-        }
-        #video {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-        #canvas {
+        body { margin: 0; overflow: hidden; }
+        #video-container { position: relative; }
+        #video { transform: scaleX(-1); }
+        .canvas-overlay { 
             position: absolute;
             top: 0;
             left: 0;
-            pointer-events: none;
         }
-        #gestureStatus {
-            position: absolute;
-            top: 20px;
-            left: 20px;
+        .control-panel {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+        }
+        button {
+            padding: 8px;
+            margin: 4px;
+            background: #444;
             color: white;
-            font-size: 20px;
-            z-index: 10;
+            border: none;
+            cursor: pointer;
         }
     </style>
 </head>
 <body>
-    <video id="video" playsinline></video>
-    <canvas id="canvas"></canvas>
-    <div id="gestureStatus">Waiting for camera...</div>
+    <div class="control-panel">
+        <button id="fullscreen">Fullscreen</button>
+        <button id="switchCamera">Switch Camera</button>
+    </div>
+    <div id="video-container">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="handCanvas" class="canvas-overlay"></canvas>
+        <canvas id="faceCanvas" class="canvas-overlay"></canvas>
+        <canvas id="objectCanvas" class="canvas-overlay"></canvas>
+        <canvas id="drawCanvas" class="canvas-overlay"></canvas>
+    </div>
 
+    <!-- Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
     <script>
-        let video;
-        let canvas;
-        let ctx;
-        let model;
-        let hands = [];
-        let isDrawing = false;
-        let fistCount = 0;
-        let lastFistTime = 0;
-        let drawingPoints = [];
-        let okGesture = false;
+        // Camera and video setup
+        let video = document.getElementById('video');
+        let currentStream;
+        let isFrontCamera = true;
+        
+        // Canvases
+        const handCanvas = document.getElementById('handCanvas');
+        const faceCanvas = document.getElementById('faceCanvas');
+        const objectCanvas = document.getElementById('objectCanvas');
+        const drawCanvas = document.getElementById('drawCanvas');
+        const canvases = [handCanvas, faceCanvas, objectCanvas, drawCanvas];
+        
+        // State
+        let isDrawingMode = false;
+        let lastGesture = '';
+        let gestureCount = 0;
+        let lastPoint = null;
 
         async function setupCamera() {
-            video = document.getElementById('video');
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-            video.srcObject = stream;
-            return new Promise(resolve => {
-                video.onloadedmetadata = () => {
-                    video.play();
-                    resolve(video);
-                };
-            });
-        }
-
-        async function loadHandposeModel() {
-            model = await handpose.load();
-            detectHands();
-        }
-
-        async function detectHands() {
-            if (video.readyState === video.HAVE_ENOUGH_DATA) {
-                const predictions = await model.estimateHands(video);
-                hands = predictions;
-                handleGestures(predictions);
-            }
-            requestAnimationFrame(detectHands);
-        }
-
-        function handleGestures(predictions) {
-            const status = document.getElementById('gestureStatus');
-            if (predictions.length > 0) {
-                const hand = predictions[0];
-                const indexTip = hand.annotations.indexFinger[3];
-                const thumbTip = hand.annotations.thumb[3];
-                const palmBase = hand.annotations.palmBase[0];
-
-                // Fist detection (index and thumb close to palm base)
-                const distanceToPalm = Math.hypot(
-                    indexTip[0] - palmBase[0],
-                    indexTip[1] - palmBase[1]
-                );
-
-                if (distanceToPalm < 50) {
-                    const currentTime = Date.now();
-                    if (currentTime - lastFistTime > 500) {
-                        fistCount++;
-                        lastFistTime = currentTime;
-                    }
+            const constraints = {
+                video: { 
+                    facingMode: isFrontCamera ? 'user' : 'environment',
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
                 }
-
-                // Check for double fist then index finger
-                if (fistCount >= 2 && distanceToPalm > 100) {
-                    isDrawing = true;
-                    status.textContent = 'Drawing mode active!';
-                }
-
-                // OK gesture (thumb tip and index tip close)
-                const okDistance = Math.hypot(
-                    thumbTip[0] - indexTip[0],
-                    thumbTip[1] - indexTip[1]
-                );
-
-                if (okDistance < 30 && !okGesture) {
-                    okGesture = true;
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    drawingPoints = [];
-                    status.textContent = 'Canvas cleared!';
-                } else if (okDistance > 50) {
-                    okGesture = false;
-                }
-            }
-        }
-
-        function drawHands() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            };
             
-            if (hands.length > 0) {
-                const hand = hands[0];
-                const boundingBox = hand.boundingBox;
+            try {
+                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = currentStream;
+                await new Promise(resolve => video.onloadedmetadata = resolve);
+                
+                canvases.forEach(canvas => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                });
+            } catch(error) {
+                console.error('Camera error:', error);
+            }
+        }
 
-                // Draw green bounding box
-                ctx.strokeStyle = 'green';
-                ctx.lineWidth = 3;
-                ctx.strokeRect(
-                    boundingBox.topLeft[0],
-                    boundingBox.topLeft[1],
-                    boundingBox.bottomRight[0] - boundingBox.topLeft[0],
-                    boundingBox.bottomRight[1] - boundingBox.topLeft[1]
+        // MediaPipe Hands setup
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+        
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        
+        hands.onResults(processHands);
+
+        // Face-API setup
+        async function loadFaceModels() {
+            await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
+            await faceapi.nets.ageGenderNet.loadFromUri('/models');
+            await faceapi.nets.faceExpressionNet.loadFromUri('/models');
+        }
+
+        // COCO-SSD setup
+        let cocoModel;
+        async function loadCocoModel() {
+            cocoModel = await cocoSsd.load();
+        }
+
+        // Fullscreen and camera switching
+        document.getElementById('fullscreen').onclick = () => 
+            document.documentElement.requestFullscreen();
+            
+        document.getElementById('switchCamera').onclick = () => {
+            isFrontCamera = !isFrontCamera;
+            setupCamera();
+        };
+
+        // Main processing loop
+        async function processFrame() {
+            // Process hands
+            await hands.send({image: video});
+            
+            // Process faces
+            const faceCtx = faceCanvas.getContext('2d');
+            faceCtx.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
+            
+            const detections = await faceapi.detectAllFaces(video, 
+                new faceapi.TinyFaceDetectorOptions())
+                .withAgeAndGender()
+                .withFaceExpressions();
+            
+            detections.forEach(detection => {
+                const box = detection.detection.box;
+                faceCtx.strokeStyle = 'yellow';
+                faceCtx.lineWidth = 2;
+                faceCtx.strokeRect(box.x, box.y, box.width, box.height);
+                
+                // Display age and emotion
+                faceCtx.fillStyle = 'yellow';
+                faceCtx.fillText(
+                    `Age: ${Math.round(detection.age)}, ${detection.gender} | ` +
+                    `Emotion: ${detection.expressions.asSortedArray()[0].expression}`,
+                    box.x, box.y - 5
                 );
+            });
 
-                if (isDrawing) {
-                    const indexTip = hand.annotations.indexFinger[3];
-                    drawingPoints.push({ x: indexTip[0], y: indexTip[1] });
+            // Process objects
+            const objectCtx = objectCanvas.getContext('2d');
+            objectCtx.clearRect(0, 0, objectCanvas.width, objectCanvas.height);
+            
+            const predictions = await cocoModel.detect(video);
+            predictions.forEach(prediction => {
+                const [x, y, width, height] = prediction.bbox;
+                let color = 'yellow';
+                let label = prediction.class;
+                
+                if(['knife', 'gun', 'scissors'].includes(prediction.class)) {
+                    color = 'red';
+                    label = `DANGER: ${label}`;
+                } else if(['apple', 'banana', 'pizza'].includes(prediction.class)) {
+                    color = 'green';
+                    label = `Food: ${label}`;
                 }
+                
+                objectCtx.strokeStyle = color;
+                objectCtx.lineWidth = 2;
+                objectCtx.strokeRect(x, y, width, height);
+                objectCtx.fillStyle = color;
+                objectCtx.fillText(label, x, y > 10 ? y - 5 : 10);
+            });
+
+            requestAnimationFrame(processFrame);
+        }
+
+        function processHands(results) {
+            const ctx = handCanvas.getContext('2d');
+            ctx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+            
+            if (results.multiHandLandmarks) {
+                results.multiHandLandmarks.forEach(landmarks => {
+                    // Draw hand bounding box
+                    const xs = landmarks.map(l => l.x * video.videoWidth);
+                    const ys = landmarks.map(l => l.y * video.videoHeight);
+                    const x = Math.min(...xs);
+                    const y = Math.min(...ys);
+                    const width = Math.max(...xs) - x;
+                    const height = Math.max(...ys) - y;
+                    
+                    ctx.strokeStyle = 'green';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(x, y, width, height);
+
+                    // Gesture recognition
+                    detectGestures(landmarks);
+                });
+            }
+        }
+
+        function detectGestures(landmarks) {
+            // Implement gesture detection logic
+            // (Simplified example - needs proper implementation)
+            const thumbTip = landmarks[4];
+            const indexTip = landmarks[8];
+            const middleTip = landmarks[12];
+            
+            // Check for "OK" gesture
+            const distance = Math.hypot(
+                thumbTip.x - indexTip.x,
+                thumbTip.y - indexTip.y
+            );
+            
+            if(distance < 0.05) {
+                // Clear drawing
+                const ctx = drawCanvas.getContext('2d');
+                ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+                return;
             }
 
-            // Draw the path
-            ctx.strokeStyle = 'black';
-            ctx.lineWidth = 5;
-            ctx.beginPath();
-            drawingPoints.forEach((point, i) => {
-                if (i === 0) ctx.moveTo(point.x, point.y);
-                else ctx.lineTo(point.x, point.y);
-            });
-            ctx.stroke();
-
-            requestAnimationFrame(drawHands);
+            // Other gesture detection logic...
         }
 
-        async function init() {
+        // Initialization
+        (async function main() {
             await setupCamera();
-            await loadHandposeModel();
-            canvas = document.getElementById('canvas');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            ctx = canvas.getContext('2d');
-            drawHands();
-        }
-
-        init();
+            await loadFaceModels();
+            await loadCocoModel();
+            processFrame();
+        })();
     </script>
 </body>
 </html>
