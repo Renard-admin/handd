@@ -1,242 +1,167 @@
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
-    <title>AI Vision Demo</title>
+    <meta charset="UTF-8">
+    <title>Умное распознавание</title>
     <style>
         body { margin: 0; overflow: hidden; }
-        #video-container { position: relative; }
-        #video { transform: scaleX(-1); }
-        .canvas-overlay { 
-            position: absolute;
-            top: 0;
-            left: 0;
-        }
-        .control-panel {
-            position: fixed;
-            top: 10px;
-            right: 10px;
-            z-index: 1000;
-        }
-        button {
-            padding: 8px;
-            margin: 4px;
-            background: #444;
-            color: white;
-            border: none;
-            cursor: pointer;
-        }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        video, canvas { position: absolute; top: 0; left: 0; transform: scaleX(-1); }
+        .canvas-layer { position: absolute; pointer-events: none; }
+        .controls { position: fixed; top: 10px; right: 10px; z-index: 1000; }
+        button { display: block; margin: 5px; padding: 8px; background: #444; color: white; border: none; cursor: pointer; }
     </style>
 </head>
 <body>
-    <div class="control-panel">
-        <button id="fullscreen">Fullscreen</button>
-        <button id="switchCamera">Switch Camera</button>
-    </div>
-    <div id="video-container">
+    <div id="container">
         <video id="video" autoplay playsinline></video>
-        <canvas id="handCanvas" class="canvas-overlay"></canvas>
-        <canvas id="faceCanvas" class="canvas-overlay"></canvas>
-        <canvas id="objectCanvas" class="canvas-overlay"></canvas>
-        <canvas id="drawCanvas" class="canvas-overlay"></canvas>
+        <canvas id="handCanvas" class="canvas-layer"></canvas>
+        <canvas id="faceCanvas" class="canvas-layer"></canvas>
+        <canvas id="objectCanvas" class="canvas-layer"></canvas>
+        <div class="controls">
+            <button id="fullscreenBtn">📺</button>
+            <button id="switchCameraBtn">🔄 Камера</button>
+        </div>
     </div>
 
-    <!-- Libraries -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/face-api.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 
     <script>
-        // Camera and video setup
-        let video = document.getElementById('video');
-        let currentStream;
-        let isFrontCamera = true;
-        
-        // Canvases
+        const video = document.getElementById('video');
         const handCanvas = document.getElementById('handCanvas');
         const faceCanvas = document.getElementById('faceCanvas');
         const objectCanvas = document.getElementById('objectCanvas');
-        const drawCanvas = document.getElementById('drawCanvas');
-        const canvases = [handCanvas, faceCanvas, objectCanvas, drawCanvas];
         
-        // State
-        let isDrawingMode = false;
-        let lastGesture = '';
-        let gestureCount = 0;
-        let lastPoint = null;
+        let isDrawing = false;
+        let currentStream = null;
+        let modelsLoaded = false;
 
-        async function setupCamera() {
+        // Инициализация моделей
+        async function initializeModels() {
+            await Promise.all([
+                faceapi.nets.tinyFaceDetector.loadFromUri('/models'),
+                faceapi.nets.ageGenderNet.loadFromUri('/models'),
+                faceapi.nets.faceExpressionNet.loadFromUri('/models'),
+                cocoSsd.load()
+            ]);
+            modelsLoaded = true;
+        }
+
+        // Запрос доступа к камере
+        async function setupCamera(facingMode = 'user') {
             const constraints = {
                 video: { 
-                    facingMode: isFrontCamera ? 'user' : 'environment',
+                    facingMode: facingMode,
                     width: { ideal: 1280 },
                     height: { ideal: 720 }
                 }
             };
             
             try {
-                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
-                video.srcObject = currentStream;
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                if (currentStream) currentStream.getTracks().forEach(track => track.stop());
+                currentStream = stream;
+                video.srcObject = stream;
                 await new Promise(resolve => video.onloadedmetadata = resolve);
-                
-                canvases.forEach(canvas => {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                });
-            } catch(error) {
-                console.error('Camera error:', error);
+                setupCanvases();
+            } catch (error) {
+                console.error('Ошибка доступа к камере:', error);
             }
         }
 
-        // MediaPipe Hands setup
+        function setupCanvases() {
+            [handCanvas, faceCanvas, objectCanvas].forEach(canvas => {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            });
+        }
+
+        // Логика распознавания жестов
         const hands = new Hands({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
-        
+
         hands.setOptions({
             maxNumHands: 2,
             modelComplexity: 1,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
         });
-        
+
         hands.onResults(processHands);
 
-        // Face-API setup
-        async function loadFaceModels() {
-            await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
-            await faceapi.nets.ageGenderNet.loadFromUri('/models');
-            await faceapi.nets.faceExpressionNet.loadFromUri('/models');
+        // Обработка объектов
+        async function detectObjects() {
+            if (!modelsLoaded) return;
+            const predictions = await cocoSsd.detect(video);
+            drawObjectPredictions(predictions);
         }
 
-        // COCO-SSD setup
-        let cocoModel;
-        async function loadCocoModel() {
-            cocoModel = await cocoSsd.load();
-        }
-
-        // Fullscreen and camera switching
-        document.getElementById('fullscreen').onclick = () => 
-            document.documentElement.requestFullscreen();
-            
-        document.getElementById('switchCamera').onclick = () => {
-            isFrontCamera = !isFrontCamera;
-            setupCamera();
-        };
-
-        // Main processing loop
-        async function processFrame() {
-            // Process hands
-            await hands.send({image: video});
-            
-            // Process faces
-            const faceCtx = faceCanvas.getContext('2d');
-            faceCtx.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
-            
+        // Обработка лиц
+        async function detectFaces() {
+            if (!modelsLoaded) return;
             const detections = await faceapi.detectAllFaces(video, 
                 new faceapi.TinyFaceDetectorOptions())
                 .withAgeAndGender()
                 .withFaceExpressions();
             
+            const ctx = faceCanvas.getContext('2d');
+            ctx.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
+            
             detections.forEach(detection => {
                 const box = detection.detection.box;
-                faceCtx.strokeStyle = 'yellow';
-                faceCtx.lineWidth = 2;
-                faceCtx.strokeRect(box.x, box.y, box.width, box.height);
+                ctx.strokeStyle = 'yellow';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(box.x, box.y, box.width, box.height);
                 
-                // Display age and emotion
-                faceCtx.fillStyle = 'yellow';
-                faceCtx.fillText(
-                    `Age: ${Math.round(detection.age)}, ${detection.gender} | ` +
-                    `Emotion: ${detection.expressions.asSortedArray()[0].expression}`,
-                    box.x, box.y - 5
-                );
+                // Вывод информации
+                ctx.fillStyle = 'yellow';
+                ctx.font = '12px Arial';
+                const age = Math.round(detection.age);
+                const gender = detection.gender;
+                const expression = Object.entries(detection.expressions)
+                    .reduce((a, b) => a[1] > b[1] ? a : b)[0];
+                
+                ctx.fillText(`${gender}, ~${age} лет`, box.x, box.y - 5);
+                ctx.fillText(`Настроение: ${expression}`, box.x, box.y - 20);
             });
+        }
 
-            // Process objects
-            const objectCtx = objectCanvas.getContext('2d');
-            objectCtx.clearRect(0, 0, objectCanvas.width, objectCanvas.height);
+        // Основной цикл обработки
+        async function processFrame() {
+            if (!modelsLoaded) return;
             
-            const predictions = await cocoModel.detect(video);
-            predictions.forEach(prediction => {
-                const [x, y, width, height] = prediction.bbox;
-                let color = 'yellow';
-                let label = prediction.class;
-                
-                if(['knife', 'gun', 'scissors'].includes(prediction.class)) {
-                    color = 'red';
-                    label = `DANGER: ${label}`;
-                } else if(['apple', 'banana', 'pizza'].includes(prediction.class)) {
-                    color = 'green';
-                    label = `Food: ${label}`;
-                }
-                
-                objectCtx.strokeStyle = color;
-                objectCtx.lineWidth = 2;
-                objectCtx.strokeRect(x, y, width, height);
-                objectCtx.fillStyle = color;
-                objectCtx.fillText(label, x, y > 10 ? y - 5 : 10);
-            });
-
+            await hands.send({ image: video });
+            await detectFaces();
+            await detectObjects();
+            
             requestAnimationFrame(processFrame);
         }
 
-        function processHands(results) {
-            const ctx = handCanvas.getContext('2d');
-            ctx.clearRect(0, 0, handCanvas.width, handCanvas.height);
-            
-            if (results.multiHandLandmarks) {
-                results.multiHandLandmarks.forEach(landmarks => {
-                    // Draw hand bounding box
-                    const xs = landmarks.map(l => l.x * video.videoWidth);
-                    const ys = landmarks.map(l => l.y * video.videoHeight);
-                    const x = Math.min(...xs);
-                    const y = Math.min(...ys);
-                    const width = Math.max(...xs) - x;
-                    const height = Math.max(...ys) - y;
-                    
-                    ctx.strokeStyle = 'green';
-                    ctx.lineWidth = 2;
-                    ctx.strokeRect(x, y, width, height);
+        // Кнопки управления
+        document.getElementById('switchCameraBtn').addEventListener('click', async () => {
+            const newMode = currentStream.getVideoTracks()[0].getSettings().facingMode === 'user' 
+                ? 'environment' : 'user';
+            await setupCamera(newMode);
+        });
 
-                    // Gesture recognition
-                    detectGestures(landmarks);
-                });
+        document.getElementById('fullscreenBtn').addEventListener('click', () => {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+            } else {
+                document.exitFullscreen();
             }
-        }
+        });
 
-        function detectGestures(landmarks) {
-            // Implement gesture detection logic
-            // (Simplified example - needs proper implementation)
-            const thumbTip = landmarks[4];
-            const indexTip = landmarks[8];
-            const middleTip = landmarks[12];
-            
-            // Check for "OK" gesture
-            const distance = Math.hypot(
-                thumbTip.x - indexTip.x,
-                thumbTip.y - indexTip.y
-            );
-            
-            if(distance < 0.05) {
-                // Clear drawing
-                const ctx = drawCanvas.getContext('2d');
-                ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-                return;
-            }
-
-            // Other gesture detection logic...
-        }
-
-        // Initialization
+        // Инициализация приложения
         (async function main() {
+            await initializeModels();
             await setupCamera();
-            await loadFaceModels();
-            await loadCocoModel();
-            processFrame();
+            video.play();
+            requestAnimationFrame(processFrame);
         })();
     </script>
 </body>
